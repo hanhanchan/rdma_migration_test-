@@ -1,0 +1,43 @@
+{
+    "target": "bmv2",
+    "p4info": "modify-header-nocrc.p4.p4info.txt",
+    "bmv2_json": "modify-header-nocrc.json",
+    "table_entries": [
+      {
+        "table": "MyIngress.ip_lookup",
+        "match": {
+          "hdr.ipv4.dst_addr": "192.168.56.4/24"
+        },
+        "action_name": "MyIngress.mac_forward",
+        "action_params": {
+          "port": 1  
+        }
+      },
+      {
+        "table": "MyEgress.rdma_translate",
+        "match": {
+          "hdr.ipv4.dst_addr": "192.168.56.3/24",
+          "hdr.bth.destination_qp":"0x00000011",
+          "hdr.reth.remote_key":"3522"
+        },
+        "action_name": "MyEgress.translate",
+        "action_params": {
+            "qp":"0x00000012",
+            "virtual_addr":"2764346974166713464",
+            "remote_key":"3523"
+        }
+      } 
+    ],
+    "multicast_group_entries" : [
+      {
+        "multicast_group_id" : 1,
+        "replicas" : [
+          {
+            "egress_port" : 1,
+            "instance" : 1
+          } 
+        ]
+      }
+    ]
+  }
+  
