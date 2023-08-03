@@ -96,6 +96,7 @@ parser MyParser(packet_in pkt,
         pkt.extract(hdr.udp);
         transition select(hdr.udp.dst_port) {
             UDP_ROCE_V2 : parse_bth;
+ 
         }
     }
 
@@ -104,12 +105,27 @@ parser MyParser(packet_in pkt,
         transition select(hdr.bth.opcode) {
             0x00001010 : parse_reth;
             0x00101010 : parse_reth;
-            default  : accept;
+            default  : parse_rpc_rdma;
         }
     }
 
     state parse_reth {
         pkt.extract(hdr.reth);
+        transition accept;
+    }
+    state parse_rpc_rdma {
+        pkt.extract(hdr.rpc_rdma)
+        transition select(hdr.rpc_rdma.rmsg_type){
+            0: parse_reply_chunk1 ;
+            1: accept;
+        }
+    }
+    state parse_reply_chunk1 {
+        pkt.extract(hdr.reply_chunk1);
+        transaction parse_reply_chunk2 ; //default two chunk 
+    }
+    state parse_reply_chunk2 {
+        pkt.extract(hdr.reply_chunk2);
         transition accept;
     }
                 
@@ -131,7 +147,7 @@ control MyVerifyChecksum(out my_ingress_headers_t hdr, out my_ingress_metadata_t
 control MyIngress(inout headers hdr,
                   inout metadata meta,
                   inout standard_metadata_t standard_metadata) {
-
+    register<bit<1>>(LOW_CONCURRENT)  offload_flag;
     action drop() {
         mark_to_drop(standard_metadata);
     }
@@ -159,6 +175,13 @@ control MyIngress(inout headers hdr,
     apply {
         if (hdr.ipv4.isValid())
             ip_lookup.apply();
+        if (detect resend){
+            offload_flag.write(LOW_CONCURRENT,1)
+            // psn_curr=send_psn_record register read send packet's psn 
+            psn_curr write to to_client_psn 
+        }
+ 
+        
     }
 }
 
@@ -171,6 +194,30 @@ control MyEgress(inout headers hdr,
                   inout standard_metadata_t standard_metadata) {
    // todo: discriminate send/write 
    // for write first 
+   // similar to bitmap?
+   // reduce to one dimenson register 
+   example: register<type1, type2> (num);
+   register<bit<16>>(LOW_CONCURRENT,REPLY_CHUNK)  crkey;
+   register<bit<8>>(LOW_CONCURRENT,REPLY_CHUNK)  bmaxlen;
+   register<bit<64>>(LOW_CONCURRENT,REPLY_CHUNK)  cvaddres;
+   register to_client_path(LOW_CONCURRENT)
+   action reroute()
+   {
+       //rewrite header to  client ;
+       // change ip ..
+       // change header ...
+       // if first
+       // bind psn register 
+   }
+   action reset_psn()
+   {
+       // before update 
+       // after rpc response 
+   }
+   action update_psn()
+   //if(offload_flag== yes)
+   apply(reroute())
+
    action translate(bit<24> qp, bit<64> virtual_addr, bit<32> remote_key) {
         hdr.bth.destination_qp = qp;
         hdr.reth.remote_key = remote_key;
@@ -214,6 +261,17 @@ control MyEgress(inout headers hdr,
         if(rdma_translate.apply().hit) {
             swap_dst_ip.apply();
         }
+
+        if(reply_chunk1_h.isValid()){
+            crkey.write(reply_chunk1_h, reply_chunk1_h.rhandle);
+            bmaxlen.write(reply_chunk1_h,reply_chunk1_h.dma_len);
+            cvaddres.write(reply_chunk1_h,reply_chunk1_h.roffset);
+        }
+        if(reply_chunk2_h.isValid()){
+            crkey.write(reply_chunk2_h, reply_chunk2_h.rhandle);
+            bmaxlen.write(reply_chunk2_h,reply_chunk2_h.dma_len);
+            cvaddres.write(reply_chunk2_h,reply_chunk2_h.roffset);
+        }       
     }
 }
 
