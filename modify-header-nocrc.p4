@@ -1,73 +1,10 @@
 /* -*- P4_16 -*- */
 #include <core.p4>
 #include <v1model.p4>
+#include "configuration"
+#include "types"
+#include "headers"
 
-/*************************************************************************
-*********************** H E A D E R S  ***********************************
-*************************************************************************/
-typedef bit<16> ether_type_t;
-typedef bit<8> ip_protocol_t;
-
-const ether_type_t ETHERTYPE_IPV4 = 16w0x0800;
-const ip_protocol_t IP_PROTOCOLS_UDP = 0x11;
-const bit<16> UDP_ROCE_V2 = 4791;
-
-header ethernet_h {
-    bit<48>   dst_addr;
-    bit<48>   src_addr;
-    bit<16>   ether_type;
-}
-
-header ipv4_h {
-    bit<4>   version;
-    bit<4>   ihl;
-    bit<8>   diffserv;
-    bit<16>  total_len;
-    bit<16>  identification;
-    bit<3>   flags;
-    bit<13>  frag_offset;
-    bit<8>   ttl;
-    bit<8>   protocol;
-    bit<16>  hdr_checksum;
-    bit<32>  src_addr;
-    bit<32>  dst_addr;
-}
-
-header udp_h {
-    bit<16> src_port;
-    bit<16> dst_port;
-    bit<16> udp_total_len;
-    bit<16> checksum;
-}
-
-header ib_bth_h {
-    bit<8>  opcode; // 00001010 RC RDMA Write, 00101010 UC RDMA Write, 00000100 RC SEND
-    bit<8>  flags;  // 1 bit solicited event, 1 bit migreq, 2 bit padcount, 4 bit headerversion
-    bit<16> partition_key;
-    bit<8>  reserved0;
-    bit<24> destination_qp;
-    bit<1>  ack_request; 
-    bit<7>  reserved1;   
-    bit<24> packet_seqnum;
-}
-
-header ib_reth_h {
-    bit<64> virtual_addr;
-    bit<32> remote_key;
-    bit<32> dma_length;
-}
-struct my_ingress_headers_t {
-    ethernet_h      ethernet;
-    ipv4_h          ipv4;
-    udp_h           udp;
-    ib_bth_h        bth;
-    ib_reth_h       reth;
-}
-struct my_ingress_metadata_t {
-}
-/*************************************************************************
-*********************** P A R S E R  ***********************************
-*************************************************************************/
 
 parser MyParser(packet_in pkt,
                 out my_ingress_headers_t hdr,
@@ -147,7 +84,49 @@ control MyVerifyChecksum(out my_ingress_headers_t hdr, out my_ingress_metadata_t
 control MyIngress(inout headers hdr,
                   inout metadata meta,
                   inout standard_metadata_t standard_metadata) {
-    register<bit<1>>(LOW_CONCURRENT)  offload_flag;
+    typedef<4 bit> forward_times_t; //other server to process the request 
+    register<client_info_t,  mount_point_t>(LOW_CONCURRENT)  client_info; //one operation per client 
+    register<forward_times_t, mount_point_t>(LOW_CONCURRENT)  offload_flag;  
+    register<server_set_t, xid_t>(LOW_CONCURRENT)  host_set;
+
+    register <src_map_t, mount_point> reroute ; //knowns rdma operation's original XID 
+
+    if hdr.dst=mount_point{
+        apply action reroute 
+    }
+
+    table 
+
+    action check_offload_flag()
+    {
+         no duplicate xid, then add to client_info
+         forward_times_t+=1
+    }
+    action save_host()
+    {
+        update host_set
+    }
+    action reroute_client(xid)
+    {
+        multiple return =client_info read
+        change ip,
+        if first rdma, change reth
+        change psn later 
+    }
+    action add_entry()
+    table key: 1. add server 1, server 2... 
+    match register host_set...
+    action reroute_client()
+    register server_map <server_address_t, index>
+    
+
+    if forward_times_t>2: apply table reroute_client
+
+    table reroute_to_client
+    {
+        key=
+    }
+
     action drop() {
         mark_to_drop(standard_metadata);
     }
@@ -171,18 +150,79 @@ control MyIngress(inout headers hdr,
         }
         size = 1024;
         default_action = multicast;
-    }
-    apply {
-        if (hdr.ipv4.isValid())
-            ip_lookup.apply();
-        if (detect resend){
-            offload_flag.write(LOW_CONCURRENT,1)
-            // psn_curr=send_psn_record register read send packet's psn 
-            psn_curr write to to_client_psn 
-        }
- 
+    action rewrite psn
+    action rewrite basic_info
+    action rewrite reth
+    action for first_packet {rewrite reth; rewrite basic_info; rewrite psn} //all rdma needs rewrite psn 
+    action for second_packet
+
+
+    register<encode_t,ipv4_addr_t> encode_ip_reg;
+    action decode_src_dst()
+    { 
+        \\simple map
+        temp_src;
+        temp_dst;
+        temp_all;
+        encode_ip_reg.read(temp_src,hdr.src)
+        encode_ip_reg.read(temp_dst,hdr.dst)
+        temp_all=temp_src+temp_dst
+        hdr.offload_pair=temp_all
         
+    
     }
+
+    typdef bit<2> times_t;
+    typdef bit<4> offload_pair_t;
+    const times_t OFFLOAD_THRESHOLD=2;
+    register<times_t,xid> recog_xid_reg;
+    register<sequence_number_t,ipv4_addr_t> psn_reg;
+    register<offload_pair_t,xid_t> offload_pair_reg;
+    register<rhandle_t,xid_t> rhandle_reg;
+    register<dma_len_t,xid_t> dma_len_reg;
+    register<roffset_t,xid_t> roffset_reg;
+
+    apply{
+ 
+        for nfs operation:
+            //register psn
+            psn_reg.write(hdr.dst, hdr.psn);  //update to new value, todo: check mechanism; 
+            // update forward nfs times
+            times_t  temp_times; //equals to maxmize backend;
+            recog_xid_reg.read(temp_times,hdr.rpc.xid);
+            temp_times=temp_times+1;
+            recog_xid_reg.write(hdr.rpc.xid,temp_times);
+            if (temp_times > OFFLOAD_THRESHOLD)  //reroute rdma 
+            {
+                decode_src_dst.apply()
+                offload_pair_reg.write(hdr.offload_pair,xid_t) // todo: one xid maps to multiple offload_pair
+            }
+            else
+            {
+                // add client info, per item per register 
+                rhandle_reg.write(hdr.handle,xid);
+                dma_len_reg.write(hdr.dma,xid);
+                roffset_reg.write(hdr.roffset,xid);
+
+            }
+
+
+                // todo challenge: when multiple host servers, last nfs forward packet cross with first rdma write 
+                // assume that forward_times_t knowns, for simplicity, 
+        for rdma operation:
+            decode_src_dst.apply()
+            temp_xid;
+            if (offload_pair_reg.read(temp_xid,hdr.offload_pair) has value)
+            {
+                \\for which destination 
+                if op.code==first_packet
+                    table first_reroute.apply()
+                if second...
+            }
+ 
+    }
+    todo: ack rules
+    ack switch's psn 
 }
 
 /*************************************************************************
