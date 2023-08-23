@@ -231,3 +231,67 @@ if __name__ == '__main__':
         print("\nBMv2 JSON file not found: %s\nHave you run 'make'?" % args.bmv2_json)
         parser.exit(1)
     main(args.p4info, args.bmv2_json)
+# run on mountpoint
+import subprocess
+serverB_ip_addr="192.168.56.4"
+serverC_ip_addr="192.168.56.4"
+client_ip_addr="192.168.56.2"
+def writeTunnelRules(p4info_helper,sw):
+    # 1) match server B, rewrite dst from server A to client 
+    table_entry = p4info_helper.buildTableEntry(
+        table_name="MyEgress.ipv4_lpm",
+        match_fields={
+            "hdr.ipv4.dstAddr": (serverB_ip_addr, 32)
+        },
+        action_name="MyIngress.reroute",
+        action_params={
+            "new_dst_addr": client_ip_addr,
+        })
+    sw.WriteTableEntry(table_entry)
+    print("Installed ingress tunnel rule on %s" % sw.name)
+
+if __name__ == '__main__':
+    ## connect controller to switch 
+    parser = argparse.ArgumentParser(description='P4Runtime Controller')
+    parser.add_argument('--p4info', help='p4info proto in text format from p4c',
+                        type=str, action="store", required=False,
+                        default='./build/offload_connection.p4.p4info.txt')
+    parser.add_argument('--bmv2-json', help='BMv2 JSON file from p4c',
+                        type=str, action="store", required=False,
+                        default='./build/offload_connection.json')
+    args = parser.parse_args()
+
+    if not os.path.exists(args.p4info):
+        parser.print_help()
+        print("\np4info file not found: %s\nHave you run 'make'?" % args.p4info)
+        parser.exit(1)
+    if not os.path.exists(args.bmv2_json):
+        parser.print_help()
+        print("\nBMv2 JSON file not found: %s\nHave you run 'make'?" % args.bmv2_json)
+        parser.exit(1)
+    p4info_file_path=args.p4info
+    bmv2_file_path=args.bmv2_json
+    p4info_helper = p4runtime_lib.helper.P4InfoHelper(p4info_file_path)
+    s1 = p4runtime_lib.bmv2.Bmv2SwitchConnection(
+        name='s1',
+        address='192.168.56.10:50051',
+        device_id=0,
+        proto_dump_file='logs/s1-p4runtime-requests.txt')
+    s1.MasterArbitrationUpdate()
+    s1.SetForwardingPipelineConfig(p4info=p4info_helper.p4info,
+                                       bmv2_json_file_path=bmv2_file_path)
+    print("Installed P4 Program using SetForwardingPipelineConfig on s1")
+    # wait to adds match-action rule
+    while True:
+        output = subprocess.check_output(["sudo", "tcpdump", "-i", "eth1", "udp", "and", "src", "host", "192.168.56.3", "and", "dst", "host", "192.168.56.4", "and", "dst", "port", "4791"])
+        if output:
+            writeTunnelRules(p4info_helper,s1)
+            break
+    """
+    test cast 
+    server A: NFS read 
+    switch write response to drop, make a copy, check the saved packet 
+    
+    """
+
+
