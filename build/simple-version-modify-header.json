@@ -1,0 +1,33 @@
+{
+    "target": "bmv2",
+    "p4info": "build/simple-version-modify-header.p4.p4info.txt",
+    "bmv2_json": "build/simple-version-modify-header.json",
+    "table_entries": [
+        {
+          "table": "MyIngress.ip_forward",
+          "match": {
+            "hdr.ipv4.dst_addr": "192.168.56.3"
+          },
+          "action_name": "MyIngress.l3_forward",
+          "action_params": {
+            "port": 1999
+          }
+        }
+    ],
+      "multicast_group_entries" :[
+      {
+        "multicast_group_id" : 1,
+        "replicas" : [
+          {
+            "egress_port" : 2000,
+            "instance" : 1
+          },
+          {
+            "egress_port" : 2001,
+            "instance" : 1
+          }
+        ]
+      }
+    ]
+  }
+  

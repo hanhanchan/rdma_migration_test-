@@ -104,7 +104,7 @@ header rpc_h{
     rpc_type_t rproc;
 }
 // Full header stack
-struct my_ingress_headers_t {
+struct headers {
     ethernet_h     ethernet;
     ipv4_h         ipv4;
     udp_h          udp;
@@ -118,6 +118,7 @@ struct my_ingress_headers_t {
     rpc_rdma_h     rpc_rdma;
   
 }
-struct my_ingress_metadata_t {
+struct metadata {
 }
+ 
 #endif /* _HEADERS_ */
