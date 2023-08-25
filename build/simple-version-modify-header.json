@@ -30,4 +30,19 @@
       }
     ]
   }
+
+
+  ps afx|grep simple_switch
+
+
+sudo p4c -b bmv2 -o build simple-version-modify-header.p4
+
+sudo simple_switch --interface 1@eth1 --log-console  build/simple-version-modify-header.json &
+sudo simple_switch_CLI
+sudo tcpdump -i eth1 port 1999 -w save.pcap
+
+
+table_add ip_forward l3_forward 192.168.56.10/32 => 1999
+table_add  create_roce_packet fill_in_roce_fields 192.168.56.10/32 =>  08:00:27:49:bf:9c 192.168.56.10/32 63494  08:01:27:d1:20:9a 192.168.56.2/32
+table_add  create_reth_packet fill_in_reth_fields 192.168.56.10/32 => 140086162644888 999
   

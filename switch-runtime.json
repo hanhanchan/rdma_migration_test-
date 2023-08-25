@@ -1,43 +1,57 @@
 {
-    "target": "bmv2",
-    "p4info": "modify-header-nocrc.p4.p4info.txt",
-    "bmv2_json": "modify-header-nocrc.json",
-    "table_entries": [
+  "target": "bmv2",
+  "p4info": "build/simple-version-modify-header.p4.p4info.txt",
+  "bmv2_json": "build/simple-version-modify-header.json",
+  "table_entries": [
       {
-        "table": "MyIngress.ip_lookup",
+        "table": "MyIngress.ip_forward",
         "match": {
-          "hdr.ipv4.dst_addr": "192.168.56.4/24"
+          "hdr.ipv4.dst_addr": "192.168.56.4"
         },
-        "action_name": "MyIngress.mac_forward",
+        "action_name": "MyIngress.l3_forward",
         "action_params": {
-          "port": 1  
+          "port": 1999
         }
       },
       {
-        "table": "MyEgress.rdma_translate",
+        "table": "MyEgress.create_roce_packet",
         "match": {
-          "hdr.ipv4.dst_addr": "192.168.56.3/24",
-          "hdr.bth.destination_qp":"0x00000011",
-          "hdr.reth.remote_key":"3522"
+          "standard_metadata.egress_spec": "1999"
         },
-        "action_name": "MyEgress.translate",
+        "action_name": "MyEgress.fill_in_roce_fields",
         "action_params": {
-            "qp":"0x00000012",
-            "virtual_addr":"2764346974166713464",
-            "remote_key":"3523"
-        }
-      } 
-    ],
-    "multicast_group_entries" : [
-      {
-        "multicast_group_id" : 1,
-        "replicas" : [
-          {
-            "egress_port" : 1,
-            "instance" : 1
-          } 
-        ]
+          "dest_mac":"08:00:27:49:bf:9c",
+          "dest_ip" :"192.168.56.2",
+          "mount_port":"63494",
+          "mount_mac":"08:00:27:d1:20:9a",
+          "mount_ip":"192.168.56.7"
+        }          
       }
-    ]
-  }
-  
+      {
+        "table": "MyEgress.create_roce_packet",
+        "match": {
+          "standard_metadata.egress_spec": "1999"
+        },
+        "action_name": "MyEgress.fill_in_reth_fields",
+        "action_params": {
+          "mount_raddr":"140086162644888",
+          "mount_rkey":"789"
+        }          
+      }
+  ],
+    "multicast_group_entries" :[
+    {
+      "multicast_group_id" : 1,
+      "replicas" : [
+        {
+          "egress_port" : 2000,
+          "instance" : 1
+        },
+        {
+          "egress_port" : 2001,
+          "instance" : 1
+        }
+      ]
+    }
+  ]
+}

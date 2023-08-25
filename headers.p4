@@ -27,8 +27,8 @@ header ipv4_h {
 }
  
 header udp_h {
-    bit<16> src_port;
-    bit<16> dst_port;
+    udp_port_t src_port;
+    udp_port_t dst_port;
     bit<16> length;
     bit<16> checksum;
 }
@@ -54,8 +54,8 @@ header ib_bth_h {
 
 // InfiniBand-RoCE RDMA Extended Transport Header
 header ib_reth_h {
-    bit<64> addr;
-    bit<32> r_key;
+    addr_t raddr;
+    rkey_t r_key;
     bit<32> len;
 }
 
@@ -68,14 +68,6 @@ header ib_immediate_h {
 header ib_icrc_h {
     bit<32> icrc;
 }
-
- 
-typedef bit<32> program_t;
-typedef bit<2> rver_t;
-typedef bit<2> programv_t;
-typedef bit<1> ver_t;
- 
-
 
 header rpc_rdma_h{
     bit<32> xid;
@@ -110,12 +102,12 @@ struct headers {
     udp_h          udp;
     ib_bth_h       ib_bth;
     ib_reth_h      ib_reth;
-    ib_immediate_h ib_immediate;
-    ib_icrc_h      ib_icrc;
-    rpc_h          rpc;
-    reply_chunk1_h reply_chunk1;
-    reply_chunk2_h  reply_chunk2;
-    rpc_rdma_h     rpc_rdma;
+    //ib_immediate_h ib_immediate;
+   //ib_icrc_h      ib_icrc;
+    //rpc_h          rpc;
+    //reply_chunk1_h reply_chunk1;
+   // reply_chunk2_h  reply_chunk2;
+    //rpc_rdma_h     rpc_rdma;
   
 }
 struct metadata {
