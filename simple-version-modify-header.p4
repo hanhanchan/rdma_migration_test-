@@ -66,13 +66,12 @@ control MyIngress(inout headers hdr,
     action drop() {
         mark_to_drop(standard_metadata);
     }
-    action ipv4_forward(ipv4_addr_t client_ip, bit<48> client_mac, egressSpec_t port) {
-        standard_metadata.egress_spec = port;
-        hdr.ethernet.msrc_addr = hdr.ethernet.mst_addr;
-        hdr.ethernet.mst_addr = client_mac;
-        hdr.ipv4.src_addr=hdr.ipv4.dst_addr;
-        hdr.ipv4.dst_addr=client_ip;
-  
+    action ipv4_forward(ipv4_addr_t switch_ip, ipv4_addr_t host_ip, bit<48> switch_mac,  bit<48> host_mac, udp_port_t switch_port) {
+        hdr.ethernet.msrc_addr = switch_addr;
+        hdr.ethernet.mst_addr = host_mac;
+        hdr.ipv4.src_addr=switch_ip;
+        hdr.ipv4.dst_addr=host_ip;
+        hdr.udp.src_port=switch_port
     }
 
     table ipv4_lpm {
@@ -89,7 +88,7 @@ control MyIngress(inout headers hdr,
     }
 
     apply {
-        if (hdr.ipv4.isValid()) {
+        if (hdr.ib_bth.opcode==READ_RESPONSE_FIRST or READ_RESPONSE_MIDDLE or  READ_RESPONSE_LAST) {
             ipv4_lpm.apply();
         }
     }
@@ -103,7 +102,7 @@ control MyEgress(inout headers hdr,
                   inout metadata meta,
                   inout standard_metadata_t standard_metadata) {
 
-    action translate(bit<64> mount_raddr, rkey_t mount_rkey) {
+    action translate(addr_t mount_raddr, rkey_t mount_rkey) {
         hdr.ib_reth.setValid();
         hdr.ib_reth.r_key = mount_rkey;
         hdr.ib_reth.raddr=mount_raddr;

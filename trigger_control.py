@@ -1,4 +1,21 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3.8
+import subprocess
+import sys
+import threading 
+sys.path.append('..')
+
+from connec_utils.connection import SKT, CM
+from connec_utils.param_parser import parser  #connection parser 
+
+from pyverbs.addr import AH, AHAttr, GlobalRoute
+from pyverbs.cq import CQ
+from pyverbs.device import Context
+from pyverbs.enums import *
+from pyverbs.mr import MR
+from pyverbs.pd import PD
+from pyverbs.qp import QP, QPCap, QPInitAttr, QPAttr
+from pyverbs.wr import SGE, RecvWR, SendWR
+#----origin controller 
 import argparse
 import os
 import sys
@@ -10,283 +27,204 @@ import grpc
 # Probably there's a better way of doing this.
 sys.path.append(
     os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                 '../../utils/'))
+                 '../utils/'))
 import p4runtime_lib.bmv2
 import p4runtime_lib.helper
+from p4runtime_lib.error_utils import printGrpcError
 from p4runtime_lib.switch import ShutdownAllSwitchConnections
-
+from scapy.all import *
+from scapy.contrib.roce import  *
+from scapy.packet import *
 SWITCH_TO_HOST_PORT = 1
 SWITCH_TO_SWITCH_PORT = 2
 
-
-def writeTunnelRules(p4info_helper, ingress_sw, egress_sw, tunnel_id,
-                     dst_eth_addr, dst_ip_addr):
-    """
-    Installs three rules:
-    1) An tunnel ingress rule on the ingress switch in the ipv4_lpm table that
-       encapsulates traffic into a tunnel with the specified ID
-    2) A transit rule on the ingress switch that forwards traffic based on
-       the specified ID
-    3) An tunnel egress rule on the egress switch that decapsulates traffic
-       with the specified ID and sends it to the host
-
-    :param p4info_helper: the P4Info helper
-    :param ingress_sw: the ingress switch connection
-    :param egress_sw: the egress switch connection
-    :param tunnel_id: the specified tunnel ID
-    :param dst_eth_addr: the destination IP to match in the ingress rule
-    :param dst_ip_addr: the destination Ethernet address to write in the
-                        egress rule
-    """
-    # 1) Tunnel Ingress Rule
+RECV_WR = 1
+SEND_WR = 2
+GRH_LENGTH = 40
+content=["content1","content2","content3","content4"]
+mr=["mr1","mr2","mr3","mr4"]
+sgl=["sgl1","sgl2","sgl3","sgl4"]
+remote_info=["remote_info1","remote_info2","remote_info3","remote_info4"]
+wr=["wr1","wr2","wr3","wr4"]
+switch_ip_addr="192.168.56.10"
+serverB_ip_addr="192.168.56.3"
+serverC_ip_addr="192.168.56.4"
+client_ip_addr="192.168.56.2"
+# TODO: Error handling
+def read_mr(mr):
+    if args['qp_type'] == IBV_QPT_UD and server:
+        return mr.read(mr.length - GRH_LENGTH, GRH_LENGTH).decode()
+    else:
+        return mr.read(mr.length, 0).decode()  
+def writeIPRules(p4info_helper,sw,rswitch_ip_addr,rhost_ip_addr,rswitch_mac,rhost_mac,rswitch_port):
+    # 1) match server B, rewrite dst from server A to client 
     table_entry = p4info_helper.buildTableEntry(
         table_name="MyIngress.ipv4_lpm",
         match_fields={
-            "hdr.ipv4.dstAddr": (dst_ip_addr, 32)
+            "hdr.ipv4.dst_addr": (serverB_ip_addr, 32)
         },
-        action_name="MyIngress.myTunnel_ingress",
+        action_name="MyIngress.ipv4_forward",
         action_params={
-            "dst_id": tunnel_id,
-        })
-    ingress_sw.WriteTableEntry(table_entry)
-    print("Installed ingress tunnel rule on %s" % ingress_sw.name)
-
-    # 2) Tunnel Transit Rule
-    # The rule will need to be added to the myTunnel_exact table and match on
-    # the tunnel ID (hdr.myTunnel.dst_id). Traffic will need to be forwarded
-    # using the myTunnel_forward action on the port connected to the next switch.
-    #
-    # For our simple topology, switch 1 and switch 2 are connected using a
-    # link attached to port 2 on both switches. We have defined a variable at
-    # the top of the file, SWITCH_TO_SWITCH_PORT, that you can use as the output
-    # port for this action.
-    #
-    # We will only need a transit rule on the ingress switch because we are
-    # using a simple topology. In general, you'll need on transit rule for
-    # each switch in the path (except the last switch, which has the egress rule),
-    # and you will need to select the port dynamically for each switch based on
-    # your topology.
-
-    # TODO build the transit rule
-    # TODO install the transit rule on the ingress switch
-    table_entry = p4info_helper.buildTableEntry(
-        table_name="MyIngress.myTunnel_exact",
-        match_fields={
-            "hdr.myTunnel.dst_id": tunnel_id
-        },
-        action_name="MyIngress.myTunnel_forward",
-        action_params={
-            "port": SWITCH_TO_SWITCH_PORT
-        })
-    ingress_sw.WriteTableEntry(table_entry)
-    print("Installed transit tunnel rule on %s" % ingress_sw.name)
-
-    # 3) Tunnel Egress Rule
-    # For our simple topology, the host will always be located on the
-    # SWITCH_TO_HOST_PORT (port 1).
-    # In general, you will need to keep track of which port the host is
-    # connected to.
-    table_entry = p4info_helper.buildTableEntry(
-        table_name="MyIngress.myTunnel_exact",
-        match_fields={
-            "hdr.myTunnel.dst_id": tunnel_id
-        },
-        action_name="MyIngress.myTunnel_egress",
-        action_params={
-            "dstAddr": dst_eth_addr,
-            "port": SWITCH_TO_HOST_PORT
-        })
-    egress_sw.WriteTableEntry(table_entry)
-    print("Installed egress tunnel rule on %s" % egress_sw.name)
-
-
-def readTableRules(p4info_helper, sw):
-    """
-    Reads the table entries from all tables on the switch.
-
-    :param p4info_helper: the P4Info helper
-    :param sw: the switch connection
-    """
-    print('\n----- Reading tables rules for %s -----' % sw.name)
-    for response in sw.ReadTableEntries():
-        for entity in response.entities:
-            entry = entity.table_entry
-            # TODO For extra credit, you can use the p4info_helper to translate
-            #      the IDs in the entry to names
-            table_name = p4info_helper.get_tables_name(entry.table_id)
-            print('%s: ' % table_name, end=' ')
-            for m in entry.match:
-                print(p4info_helper.get_match_field_name(table_name, m.field_id), end=' ')
-                print('%r' % (p4info_helper.get_match_field_value(m),), end=' ')
-            action = entry.action.action
-            action_name = p4info_helper.get_actions_name(action.action_id)
-            print('->', action_name, end=' ')
-            for p in action.params:
-                print(p4info_helper.get_action_param_name(action_name, p.param_id), end=' ')
-                print('%r' % p.value, end=' ')
-            print()
-
-def printCounter(p4info_helper, sw, counter_name, index):
-    """
-    Reads the specified counter at the specified index from the switch. In our
-    program, the index is the tunnel ID. If the index is 0, it will return all
-    values from the counter.
-
-    :param p4info_helper: the P4Info helper
-    :param sw:  the switch connection
-    :param counter_name: the name of the counter from the P4 program
-    :param index: the counter index (in our case, the tunnel ID)
-    """
-    for response in sw.ReadCounters(p4info_helper.get_counters_id(counter_name), index):
-        for entity in response.entities:
-            counter = entity.counter_entry
-            print("%s %s %d: %d packets (%d bytes)" % (
-                sw.name, counter_name, index,
-                counter.data.packet_count, counter.data.byte_count
-            ))
-
-def printGrpcError(e):
-    print("gRPC Error:", e.details(), end=' ')
-    status_code = e.code()
-    print("(%s)" % status_code.name, end=' ')
-    traceback = sys.exc_info()[2]
-    print("[%s:%d]" % (traceback.tb_frame.f_code.co_filename, traceback.tb_lineno))
-
-def main(p4info_file_path, bmv2_file_path):
-    # Instantiate a P4Runtime helper from the p4info file
-    p4info_helper = p4runtime_lib.helper.P4InfoHelper(p4info_file_path)
-
-    try:
-        # Create a switch connection object for s1 and s2;
-        # this is backed by a P4Runtime gRPC connection.
-        # Also, dump all P4Runtime messages sent to switch to given txt files.
-        s1 = p4runtime_lib.bmv2.Bmv2SwitchConnection(
-            name='s1',
-            address='127.0.0.1:50051',
-            device_id=0,
-            proto_dump_file='logs/s1-p4runtime-requests.txt')
-        s2 = p4runtime_lib.bmv2.Bmv2SwitchConnection(
-            name='s2',
-            address='127.0.0.1:50052',
-            device_id=1,
-            proto_dump_file='logs/s2-p4runtime-requests.txt')
-
-        # Send master arbitration update message to establish this controller as
-        # master (required by P4Runtime before performing any other write operation)
-        s1.MasterArbitrationUpdate()
-        s2.MasterArbitrationUpdate()
-
-        # Install the P4 program on the switches
-        s1.SetForwardingPipelineConfig(p4info=p4info_helper.p4info,
-                                       bmv2_json_file_path=bmv2_file_path)
-        print("Installed P4 Program using SetForwardingPipelineConfig on s1")
-        s2.SetForwardingPipelineConfig(p4info=p4info_helper.p4info,
-                                       bmv2_json_file_path=bmv2_file_path)
-        print("Installed P4 Program using SetForwardingPipelineConfig on s2")
-
-        # Write the rules that tunnel traffic from h1 to h2
-        writeTunnelRules(p4info_helper, ingress_sw=s1, egress_sw=s2, tunnel_id=100,
-                         dst_eth_addr="08:00:00:00:02:22", dst_ip_addr="10.0.2.2")
-
-        # Write the rules that tunnel traffic from h2 to h1
-        writeTunnelRules(p4info_helper, ingress_sw=s2, egress_sw=s1, tunnel_id=200,
-                         dst_eth_addr="08:00:00:00:01:11", dst_ip_addr="10.0.1.1")
-
-        # TODO Uncomment the following two lines to read table entries from s1 and s2
-        readTableRules(p4info_helper, s1)
-        readTableRules(p4info_helper, s2)
-
-        # Print the tunnel counters every 2 seconds
-        while True:
-            sleep(2)
-            print('\n----- Reading tunnel counters -----')
-            printCounter(p4info_helper, s1, "MyIngress.ingressTunnelCounter", 100)
-            printCounter(p4info_helper, s2, "MyIngress.egressTunnelCounter", 100)
-            printCounter(p4info_helper, s2, "MyIngress.ingressTunnelCounter", 200)
-            printCounter(p4info_helper, s1, "MyIngress.egressTunnelCounter", 200)
-
-    except KeyboardInterrupt:
-        print(" Shutting down.")
-    except grpc.RpcError as e:
-        printGrpcError(e)
-
-    ShutdownAllSwitchConnections()
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='P4Runtime Controller')
-    parser.add_argument('--p4info', help='p4info proto in text format from p4c',
-                        type=str, action="store", required=False,
-                        default='./build/advanced_tunnel.p4.p4info.txt')
-    parser.add_argument('--bmv2-json', help='BMv2 JSON file from p4c',
-                        type=str, action="store", required=False,
-                        default='./build/advanced_tunnel.json')
-    args = parser.parse_args()
-
-    if not os.path.exists(args.p4info):
-        parser.print_help()
-        print("\np4info file not found: %s\nHave you run 'make'?" % args.p4info)
-        parser.exit(1)
-    if not os.path.exists(args.bmv2_json):
-        parser.print_help()
-        print("\nBMv2 JSON file not found: %s\nHave you run 'make'?" % args.bmv2_json)
-        parser.exit(1)
-    main(args.p4info, args.bmv2_json)
-# run on mountpoint
-import subprocess
-serverB_ip_addr="192.168.56.4"
-serverC_ip_addr="192.168.56.4"
-client_ip_addr="192.168.56.2"
-def writeTunnelRules(p4info_helper,sw):
-    # 1) match server B, rewrite dst from server A to client 
-    table_entry = p4info_helper.buildTableEntry(
-        table_name="MyEgress.ipv4_lpm",
-        match_fields={
-            "hdr.ipv4.dstAddr": (serverB_ip_addr, 32)
-        },
-        action_name="MyIngress.reroute",
-        action_params={
-            "new_dst_addr": client_ip_addr,
+            "switch_ip":rswitch_ip_addr, 
+            "host_ip":rhost_ip_addr, 
+            "switch_mac":rswitch_mac,
+            "host_mac":rhost_mac,
+            "switch_port":rswitch_port
         })
     sw.WriteTableEntry(table_entry)
     print("Installed ingress tunnel rule on %s" % sw.name)
-
+def writeTunnelRules(p4info_helper,sw,rkey,raddr):
+    # 1) match server B, rewrite dst from server A to client 
+    table_entry = p4info_helper.buildTableEntry(
+        table_name="MyEgress.rdma_translate",
+        match_fields={
+            "hdr.ipv4.dst_addr": (serverC_ip_addr, 32)
+        },
+        action_name="MyEgress.translate",
+        action_params={
+            "mount_raddr": raddr,
+            "mount_rkey": rkey
+        })
+    sw.WriteTableEntry(table_entry)
+    print("Installed ingress tunnel rule on %s" % sw.name)
+offload_flag=False
+return_flag=True
+     
 if __name__ == '__main__':
     ## connect controller to switch 
-    parser = argparse.ArgumentParser(description='P4Runtime Controller')
-    parser.add_argument('--p4info', help='p4info proto in text format from p4c',
-                        type=str, action="store", required=False,
-                        default='./build/offload_connection.p4.p4info.txt')
-    parser.add_argument('--bmv2-json', help='BMv2 JSON file from p4c',
-                        type=str, action="store", required=False,
-                        default='./build/offload_connection.json')
+    #args : connection arg
+    #p4args: switch arg
     args = parser.parse_args()
 
-    if not os.path.exists(args.p4info):
-        parser.print_help()
-        print("\np4info file not found: %s\nHave you run 'make'?" % args.p4info)
-        parser.exit(1)
-    if not os.path.exists(args.bmv2_json):
-        parser.print_help()
-        print("\nBMv2 JSON file not found: %s\nHave you run 'make'?" % args.bmv2_json)
-        parser.exit(1)
-    p4info_file_path=args.p4info
-    bmv2_file_path=args.bmv2_json
-    p4info_helper = p4runtime_lib.helper.P4InfoHelper(p4info_file_path)
-    s1 = p4runtime_lib.bmv2.Bmv2SwitchConnection(
-        name='s1',
-        address='192.168.56.10:50051',
-        device_id=0,
-        proto_dump_file='logs/s1-p4runtime-requests.txt')
-    s1.MasterArbitrationUpdate()
-    s1.SetForwardingPipelineConfig(p4info=p4info_helper.p4info,
-                                       bmv2_json_file_path=bmv2_file_path)
-    print("Installed P4 Program using SetForwardingPipelineConfig on s1")
+    server = not bool(args['server_ip'])
+    #start controller in switch 
+    if not server: 
+        # p4parser = argparse.ArgumentParser(description='P4Runtime Controller')
+        # p4parser.add_argument('--p4info', help='p4info proto in text format from p4c',
+        #                     type=str, action="store", required=False,
+        #                     default='../simple-version-modify-header.p4.p4info.txt')
+        # p4parser.add_argument('--bmv2-json', help='BMv2 JSON file from p4c',
+        #                     type=str, action="store", required=False,
+        #                     default='../simple-version-modify-header.json')
+        # p4args = p4parser.parse_args()
+
+        # if not os.path.exists(args.p4p4info):
+        #     p4parser.print_help()
+        #     print("\np4info file not found: %s\nHave you run 'make'?" % p4args.p4info)
+        #     p4parser.exit(1)
+        # if not os.path.exists(args.bmv2_json):
+        #     p4parser.print_help()
+        #     print("\nBMv2 JSON file not found: %s\nHave you run 'make'?" % p4args.bmv2_json)
+        #     p4parser.exit(1)
+        p4info_file_path='../simple-version-modify-header.p4.p4info.txt'
+        bmv2_file_path='../simple-version-modify-header.json'
+        p4info_helper = p4runtime_lib.helper.P4InfoHelper(p4info_file_path)
+        s1 = p4runtime_lib.bmv2.Bmv2SwitchConnection(
+            name='s1',
+            address='192.168.56.10:50051',
+            device_id=0,
+            proto_dump_file='logs/s1-p4runtime-requests.txt')
+        s1.MasterArbitrationUpdate()
+        s1.SetForwardingPipelineConfig(p4info=p4info_helper.p4info,
+                                        bmv2_json_file_path=bmv2_file_path)
+        print("Installed P4 Program using SetForwardingPipelineConfig on s1")
+    # start to switch info
+    #--------------------------------
+    if args['use_cm']:
+        conn = CM(args['port'], args['server_ip'])
+    else:
+        conn = SKT(args['port'], args['server_ip'])
+
+    print('-' * 80)
+    print(' ' * 25, "Python test for RDMA")
+
+    if server:
+        print("Running as server...")
+    else:
+        print("Running as client...")
+
+    print('-' * 80)
+
+    if args['qp_type'] == IBV_QPT_UD and args['operation_type'] != IBV_WR_SEND:
+        print("UD QPs don't support RDMA operations.")
+        conn.close()
+
+    conn.handshake()
+    # register for QP, GID
+    ctx = Context(name=args['ib_dev'])
+    pd = PD(ctx)
+    cq = CQ(ctx, 100)
+
+    cap = QPCap(max_send_wr=args['tx_depth'], max_recv_wr=args['rx_depth'], max_send_sge=args['sg_depth'],
+                max_recv_sge=args['sg_depth'], max_inline_data=args['inline_size'])
+    qp_init_attr = QPInitAttr(qp_type=args['qp_type'], scq=cq, rcq=cq, cap=cap, sq_sig_all=True)
+    qp = QP(pd, qp_init_attr)
+
+    gid = ctx.query_gid(port_num=1, index=args['gid_index'])
+    
+    remote_info = conn.handshake(gid=gid, qpn=qp.qp_num)
+
+    gr = GlobalRoute(dgid=remote_info['gid'], sgid_index=args['gid_index'])
+    ah_attr = AHAttr(gr=gr, is_global=1, port_num=1)
+
+    if args['qp_type'] == IBV_QPT_UD:
+        ah = AH(pd, attr=ah_attr)
+        qp.to_rts(QPAttr())
+    else:
+        qa = QPAttr()
+        qa.ah_attr = ah_attr
+        qa.dest_qp_num = remote_info['qpn']
+        qa.path_mtu = args['mtu']
+        qa.max_rd_atomic = 1
+        qa.max_dest_rd_atomic = 1
+        qa.qp_access_flags = IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE
+        if server:
+            qp.to_rtr(qa)
+        else:
+            qp.to_rts(qa)
+
+    conn.handshake()
+    if server:
+        IOdepth=args['rx_depth']
+    else:
+        IOdepth=args['tx_depth']
+    # register for  
+    mr_size = 2*args['size']    #memory safety
+    if server:
+        if args['qp_type'] == IBV_QPT_UD:   # UD needs more space to store GRH when receiving.
+            mr_size = mr_size + GRH_LENGTH
+        for i in range(IOdepth):
+            content[i] = 'S' * mr_size
+    else:
+        for i in range(IOdepth):
+            content[i] = 'C' * mr_size
+    for i in range(IOdepth):
+        mr[i]=MR(pd, mr_size, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ)
+        sgl[i]=[SGE(mr[i].buf, mr[i].length, mr[i].lkey)]
+    if args['operation_type'] != IBV_WR_SEND:
+        for i in range(IOdepth):
+            remote_info[i] = conn.handshake(addr=mr[i].buf, rkey=mr[i].rkey) 
+    #when receive rdma request, control message 
+ 
+    if not server:
+        while True:
+            if offload_flag==True and return_flag==False:
+                writeIPRules(p4info_helper,s1,switch_ip_addr,serverC_ip_addr,switch_mac,host_mac,switch_port)
+                writeTunnelRules(p4info_helper,s1,remote_info[i]['rkey'], remote_info[i]['addr'])
+                # add rewrite rules
+            if offload_flag==False and return_flag==True:
+                # remove rewrite rules
+ 
+         
+            # print(remote_info[i]['rkey'])
+            # print(remote_info[i]['addr'])
+            # writeTunnelRules(p4info_helper,s1,remote_info[i]['rkey'], remote_info[i]['addr'])
     # wait to adds match-action rule
-    while True:
-        output = subprocess.check_output(["sudo", "tcpdump", "-i", "eth1", "udp", "and", "src", "host", "192.168.56.3", "and", "dst", "host", "192.168.56.4", "and", "dst", "port", "4791"])
-        if output:
-            writeTunnelRules(p4info_helper,s1)
-            break
+    # while True:
+    #     output = subprocess.check_output(["sudo", "tcpdump", "-i", "eth1", "udp", "and", "src", "host", "192.168.56.3", "and", "dst", "host", "192.168.56.4", "and", "dst", "port", "4791"])
+    #     if output:
+    #         writeTunnelRules(p4info_helper,s1)
+    #         break
     """
     test cast 
     server A: NFS read 

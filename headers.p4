@@ -40,8 +40,8 @@ enum bit<8> ip_type_t {
 typedef bit<128> ib_gid_t;
 typedef bit<24> sequence_number_t;
 typedef bit<24> queue_pair_t;
-typedef bit<32> rkey_t;
-typedef bit<64> addr_t;
+typedef bit<16> rkey_t;
+typedef bit<32> addr_t;
 
 //rpc related type
 const ver_t RPC_RDMA_VERSION=1;
@@ -127,7 +127,11 @@ header ib_bth_h {
     sequence_number_t psn;
 }
 
- 
+header ib_aeth_h {
+    addr_t raddr;
+    rkey_t r_key;
+    bit<32> len;
+} 
 
 // InfiniBand-RoCE RDMA Extended Transport Header
 header ib_reth_h {
